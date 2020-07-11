@@ -1,0 +1,18 @@
+---
+title: "anotatedPA"
+output: html_document
+---
+
+```{r}
+library(data.table)
+anno.pa <- fread('/mnt/raid61/Personal_data/xiaoxia/APA/Project/Reference/Mm/PAS/polyA_DB_v3.2.mm10.gtf')
+anno.pa <- anno.pa[anno.pa$V3=="3' most exon" &anno.pa$V8%in%te,]
+df <- table(table(anno.pa$V8))
+df[df >20] <- 20
+ 
+```
+
+```{r length of 3utr}
+
+
+```

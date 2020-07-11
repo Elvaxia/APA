@@ -1,0 +1,266 @@
+#DE_APA
+
+
+```{r pca}
+library(data.table)
+library(factoextra)
+library(ggplot2)
+library(FactoMineR)
+library(ggrepel)
+library(RColorBrewer)
+setwd('/mnt/raid61/Personal_data/xiaoxia/APA/Project/Hema_mouse/bulk_tianjin')
+sample.info <- fread('./Hema_sampleinfo.txt',header=T)
+filtered <- fread('./Analysis/rawdata/filtered.RUD.txt',header = T)
+
+
+
+tmp <- as.data.frame(filtered[,70:101])
+tmp[tmp>1] <- NA
+tmp[is.na(tmp)] <- 0
+pca <- FactoMineR::PCA(t(tmp), ncp = 100, graph = F)
+
+pca_result <- data.frame(pca$svd$U, ID = c('LT-HSC_1','LT-HSC_2',
+                                           'ST-HSC_1','ST-HSC_2',
+                                           gsub('.RUD','',colnames(tmp)[5:32])))
+pca_result <- merge(pca_result, sample.info[, c("sample", "CellType", "Lineage")],
+                    by.x = "ID",by.y='sample')
+color.use <- colorRampPalette(brewer.pal(9,"Set1"))(19)
+names(color.use) <- unique(sample.info$CellType)
+names(color.use) <- c('LT-HSC','ST-HSC','MPP','CMP','GMP','Gn','Mo','Mp','CLP','B','CD4','CD8',
+'NK','MEP','EryA','EryB','MK','NA','NA')
+color.use <- color.use[names(color.use) != 'NA']
+
+
+ggplot(pca_result,aes(x = X1,y = X2,z=X3, col = CellType,pt.size=6))+
+  geom_point(size=6)+
+  geom_text(aes(label=ID),hjust=0, vjust=0)+
+  scale_color_manual(values=color.use)+
+  #theme_classic()+
+  #guides(colour=FALSE)+
+  xlab(paste("PC1(",round(pca$eig[,2][1],2),"%)",sep = ""))+
+  ylab(paste("PC2(",round(pca$eig[,2][2],2),"%)",sep = "")) +
+  #labs(title = "RUD of Samples", subtitle = "Principal Component Analysis")+
+  theme(panel.background=element_blank(),
+                        panel.grid=element_blank(),
+                        axis.line=element_line(),
+                        plot.margin = margin(t=0, b=0.5, r=2, l=0.5, "cm"),
+                        #legend.title=element_blank(),
+                        legend.position='right',
+                        legend.text=element_text(size=12),
+                        axis.title = element_text(size=22),
+                        axis.text = element_text(size=12))
+
+ggsave(file='Analysis/figures/pca.pdf',width=8,height=8)
+```  
+  
+```{r 3d, eval=F,echo=FALSE}
+library(gg3D)
+ggplot(pca_result, aes(x=X1, y=X2, z=X3, color=CellType,shape=Lineage)) +
+  axes_3D(phi=70) +
+  stat_3D(phi=70,size=5) +
+  scale_color_manual(values=color.use)+
+  #axis_labs_3D(phi=20)+
+  labs_3D(phi=70,
+          labs=c(paste("PC1(",round(pca$eig[,2][1],2),"%)",sep = ""), 
+                 paste("PC2(",round(pca$eig[,2][2],2),"%)",sep = ""), 
+                 paste("PC3(",round(pca$eig[,2][3],2),"%)",sep = "")),
+           hjust=c(0,1,0.8), vjust=c(1, 1, -0.5), angle=c(30, -30, 90)) +
+  theme_void()+
+    #labs(title = "RUD of Samples", subtitle = "Principal Component Analysis")+
+  theme(plot.title = element_text(hjust = 0.5,size=14),
+        #legend.position='bottom',
+        plot.subtitle = element_text(hjust = 0.5,size=14))
+
+ggsave(file='Analysis/figures/pca.3d.pdf',width = 8,height = 7)
+
+
+fviz_screeplot(pca, addlabels = TRUE)
+ggsave(file='./Figures/pca_contribution.pdf',width = 6,height = 6)
+
+```
+
+
+
+```{r randomforest}
+library(varSelRF)
+library(pheatmap)
+genes.names <- do.call(c,lapply(strsplit(filtered$PA.ID,'\\|'),function(x)x[2]))
+PA <- filtered$PA.ID
+genes.id <- do.call(c,lapply(strsplit(filtered$PA.ID,'\\|'),function(x)x[1]))
+x<-t(tmp)
+cl<-as.factor(as.numeric(as.factor(sample.info$Lineage)))
+set.seed(2)
+selected<- varSelRF(x,cl,ntree=2000,ntreeIterat=1000,vars.drop.frac=0.2)
+selected.var <- as.numeric(gsub('v','',selected$selected.vars))
+selected.dt <- tmp[selected.var,]
+rownames(selected.dt) <- PA[selected.var]
+p <- pheatmap(selected.dt,main = 'Selected Variables using RandomForest',
+              color = colorRampPalette(c("navy", "white", "firebrick3"))(200),
+              fontsize_row=6)
+pdf('Selected_Var.Lineage.pdf',height = 7,width = 12)
+p
+dev.off()
+
+x<-t(tmp)
+cl<-as.factor(as.numeric(as.factor(sample.info$CellType)))
+set.seed(2)
+selected1<- varSelRF(x,cl,ntree=2000,ntreeIterat=1000,vars.drop.frac=0.2)
+selected1.var <- as.numeric(gsub('v','',selected1$selected.vars))
+selected1.dt <- tmp[selected1.var,]
+rownames(selected1.dt) <- PA[selected1.var]
+p <- pheatmap(selected1.dt,main = 'Selected Variables using RandomForest',
+              color = colorRampPalette(c("navy", "white", "firebrick3"))(200),
+              fontsize_row=6)
+
+pdf('Selected_Var.pdf',height = 4,width = 6)
+p
+dev.off()
+library(RColorBrewer)
+#gene expression
+GeneExp <- fread('/mnt/raid63/HSC/mouse/bulk/chenghui_MmBlood/meta_RD/Mm_chenghui_hemo.RSEM_Gene_TPM.tsv',header = T)
+
+Gene.use <- GeneExp[gene_id%in%genes.id[selected.var],]
+Gene.use <- as.data.frame(Gene.use[,-1])
+rownames(Gene.use) <- genes.names[selected.var]
+
+library(circlize)
+library(grid)
+library(ComplexHeatmap)
+ht1 = Heatmap(selected.dt, name = "RUD",column_title = "RUD of samples",
+              col=colorRampPalette(c("navy", "white", "firebrick3"))(150))
+# 批量按行中心标准化，减均值除方差，Z-score,因为我们关注基因在样本间的变化，而不是样本内的基因的变化
+
+ht2 = Heatmap(t(scale(t(Gene.use))),mat_scaled, name = "Normalized TPM", 
+              column_title = "Gene Expression", 
+              col=colorRampPalette(c("navy", "white", "firebrick3"))(150))
+
+ pheatmap(Gene.use, main="Gene Expression",
+          color = colorRampPalette(c("navy", "white", "firebrick3"))(200),
+         # color  = colorRampPalette(brewer.pal(3, "Set1"))(256),
+         scale = 'row')
+ 
+ pheatmap(t(scale(t(Gene.use))), main="Gene Expression",
+          color = colors,
+          breaks = breaks)
+ 
+ generate_breaks = function(x, n, center = F){
+    if(center){
+        m = max(abs(c(min(x, na.rm = T), max(x, na.rm = T))))
+        res = seq(-m, m, length.out = n + 1)
+    }
+    else{
+        res = seq(min(x, na.rm = T), max(x, na.rm = T), length.out = n + 1)
+    }
+    
+    return(res)
+}
+ 
+ colors = colorRampPalette(c("navy", "white", "firebrick3"))(200)
+ breaks = generate_breaks(t(scale(t(Gene.use))),length(colors),center = T)
+
+#region for sashimiplot
+region <- filtered[selected.var,]
+region <- paste0(region$chr,':',region$start,':',
+                 region$end,'.',genes.names[selected.var],'.',region$PA.x)
+
+write.table(region,file='./SashimiPlot/region',col.names=F,row.names=F,quote=F)
+
+GO_genes <- unique(genes.id[selected.var])
+library(AnnotationDbi)
+library(org.Mm.eg.db)
+library(DOSE)
+library(GO.db)
+library(topGO)
+library(GSEABase)
+library(clusterProfiler)
+library(Rgraphviz)
+PA.GO <- enrichGO(gene = GO_genes,
+                       OrgDb  = org.Mm.eg.db, keyType = "ENSEMBL",
+                       ont  = "BP", pAdjustMethod = "BH",
+                       pvalueCutoff  = 0.05,qvalueCutoff  = 0.05)
+symbols <- unique(genes.names[selected.var])
+KEGG_genes<-mapIds(org.Mm.eg.db, symbols, 'ENTREZID', 'SYMBOL')
+PA.KEGG <- enrichKEGG(KEGG_genes,organism='mmu')
+pdf(paste('GO_lineage.pdf'),height = 8,width = 10)
+dotplot(PA.GO,showCategory = 20,font.size = 10)
+enrichMap(PA.GO)
+plotGOgraph(PA.GO,firstSigNodes = 15, useInfo = "all")
+dev.off()
+
+
+region1 <- filtered[selected1.var,]
+region1 <- paste0(region1$chr,':',region1$start,':',
+                 region1$end,'.',genes.names[selected1.var],'.',region1$PA.x)
+
+write.table(region1,file='./SashimiPlot/region_cell',col.names=F,row.names=F,quote=F)
+```
+
+
+
+```{r log2FC deltaRUD}
+#all cell type compared with LT-HSC,test on all genes before filtering
+cells<- sample.info$CellType
+cell.mtx<- list()
+for(i in cells){
+  samples <- sample.info[CellType==i,]$sample
+  cell.columns <- c(paste0(samples,'.L_Coverage'),paste0(samples,'.S_Coverage'),
+                   paste0(samples,'.RUD'))
+  mtx <- newfiles[,..cell.columns] 
+  mtx[is.na(mtx)] <- 0
+  mtx$mean_L <- rowMeans(mtx[,1:2])
+  mtx$mean_S <- rowMeans(mtx[,3:4])
+  mtx$mean_RUD <- rowMeans(mtx[,5:6])
+  cell.mtx[[i]] <- mtx
+}
+
+
+#evaluate the statistical significance of RUD difference
+Test.St <- function(x,y){
+  t.mtx <- cbind(x[,7:8],y[,7:8])
+  suppressWarnings(p_value <- apply(t.mtx,1,function(x){
+    con.mtx <- matrix(x,nrow=2)
+    p.v <- fisher.test(con.mtx)$p.value
+    return(p.v)
+  }))
+  FDR <- p.adjust(p_value)
+  delta_RUD <- x[,9] - y[,9]
+  log2FC <- abs(log2(x[,9]/y[,9]))
+  RUD_a <- x[,9]
+  RUD_b <- y[,9]
+  res <- cbind(p_value,FDR,delta_RUD,log2FC,RUD_a,RUD_b)
+  colnames(res) <- c('P_value','FDR','Delta_RUD','Log2FC','RUD_a','RUD_b')
+  res$id <- newfiles$PA.ID
+  return(res)
+}
+
+test.1 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[2]])
+test.2 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[3]])
+test.3 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[4]])
+test.4 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[5]])
+test.5 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[6]])
+test.6 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[7]])
+test.7 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[8]])
+test.8 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[9]])
+test.9 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[10]])
+test.10 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[11]])
+test.11 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[12]])
+test.12 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[13]])
+test.13 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[14]])
+test.14 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[15]])
+test.15 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[16]])
+test.16 <- Test.St(x=cell.mtx[[1]],y=cell.mtx[[17]])
+
+
+use.1 <- test.16[FDR <= 0.05&Delta_RUD >= 0.1&Log2FC >= 0.5&RUD_a<1&RUD_b<1,]
+
+
+use.id <- unique(use.1$id,use.2$id)
+dt <- newfiles[PA.ID%in%use.1$id,c(1,70,71,102,103)]
+dt[is.na(dt)] <- 0
+dt[dt>1] <- 1
+dt <- dt[rowMeans(dt) <1,]
+
+pheatmap(dt[,-1],cluster_cols = T,scale = 'row')
+```
+
+

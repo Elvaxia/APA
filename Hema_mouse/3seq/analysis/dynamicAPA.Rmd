@@ -1,0 +1,311 @@
+---
+title: "randomforest"
+output: html_document
+---
+
+```{r require,message=FALSE}
+setwd('/mnt/raid61/Personal_data/xiaoxia/APA/Project/Hema_mouse/3seq/analysis')
+suppressPackageStartupMessages({
+  library("DESeq2")
+  library("RColorBrewer")
+  library("pheatmap")
+  library("factoextra")
+  library("FactoMineR")
+  library("cluster")
+  library(data.table)
+  library(dplyr)
+  library(ggsci)
+  library(scales)
+  library(parallel)
+  library(dplyr)
+  library(VGAM)
+  library(varSelRF)
+})
+```
+
+```{r , warning=FALSE, message=FALSE}
+APAdata <- readRDS('../quantifyPA/all.pa/PA.Expr.filter.rds')
+pa.anno <- fread('../PAfeatures/all.pa.annotated.uniqued.txt')
+sample.info <- fread('../sample.info.txt')
+```
+
+```{r ntd data}
+dds <- readRDS('./rawdata/APA.gene.withreplicates.rds')
+df <- assay(dds)
+normalized.apa <- t(t(df)*1e6/colSums(df))
+```
+
+
+```{r gain and loss APA comprare to LT_HSC}
+names(table(pa.anno$gene_id)[table(pa.anno$gene_id)>1])->apa_gene
+apa_3utr <- pa.anno[PA.type%in%c('3_UTR','3_UTR_extended') & gene_id%in%apa_gene,]
+split.genes <- split(apa_3utr,apa_3utr$gene_id)
+  add.lable <- function(x) {
+    x <- as.data.frame(x)
+    if(nrow(x)<2){
+      x$type <- 'M'
+    }else{
+      x$type <- 'M'
+      if(unique(x$strand) == '+'){
+        x[x$end == max(x$end),]$type <- 'Distal'
+        x[x$end == min(x$end),]$type <- 'Proximal'
+      }else{
+        x[x$end == max(x$end),]$type <- 'Proximal'
+        x[x$end == min(x$end),]$type <- 'Distal'
+      }
+    }
+    return(x)
+  }
+ apa_3utr_labeled <- do.call(rbind, lapply(split.genes, add.lable))
+ apa_3utr_labeled <- apa_3utr_labeled[apa_3utr_labeled$type!='M',]
+ distal.pa <- apa_3utr_labeled[apa_3utr_labeled$type=='Distal',]$PA
+ proximal.pa <- apa_3utr_labeled[apa_3utr_labeled$type=='Proximal',]$PA
+ 
+ 
+ d.mtx <- assay(ntd)[distal.pa,]
+ p.mtx <- assay(ntd)[proximal.pa,]
+ 
+ RUD.mtx <- d.mtx /p.mtx
+ 
+ lt_hsc <- RUD.mtx[,1]
+ rs <- which(lt_hsc!=0)
+ lengthen <- apply(RUD.mtx, 2, function(x)sum(x>0))
+ shorten <- apply(RUD.mtx, 2, function(x)sum(x< 0))
+```
+
+```{r gain and PA site from LT_HSC}
+countsdata <- as.matrix(APAdata[,-1])
+rownames(countsdata) <- APAdata$PA.grouped
+colnames(countsdata) <- gsub('.all.txt','',colnames(APAdata)[-1])
+countsdata[is.na(countsdata)] <- 0
+#use only apa_gene
+#countsdata <- countsdata[rownames(assay(dds)),]
+coldata <- sample.info[match(colnames(countsdata),sample.info$Run),]
+
+
+#separate cell types
+bulk.df <- list()
+for(i in unique(coldata$CellType)){
+  samples <- as.character(coldata[coldata$CellType == i, ]$Run)
+  df <- as.data.frame(countsdata[,samples])
+  if(ncol(df) == 1 ){
+    colnames(df) <- i
+  }else{
+    df <- as.data.frame(round(rowSums(df),0))
+    colnames(df) <- i
+  }
+  bulk.df[[i]] <- df
+}
+
+gain_loss <- function(x){
+  if(x[1]!=0&x[2]!=0){
+    res <- 'gain'
+  }else{
+    if(x[1]!=0&x[2]==0){
+    res <- 'loss'
+    }else{
+      if(x[1]==0&x[2]!=0){
+    res <- 'dynamic'
+  }else{
+    res <- 'NA'
+  }
+  }
+  }
+ return(res)
+}
+
+bulk.df <- do.call(cbind, bulk.df)
+
+
+gain_loss.res <- list()
+for(i in 2:16){
+  res <- apply(bulk.df[,c(1,i)],1,gain_loss)
+  gain_loss.res[[i]] <- as.data.table(table(res))
+}
+
+
+gain_loss.res <- do.call(cbind,lapply(gain_loss.res, function(x)x[,2]))
+gain_loss.res <- gain_loss.res[1:3,]
+#gain_loss.res <- as.data.frame(t(t(gain_loss.res)/colSums(gain_loss.res)))
+colnames(gain_loss.res) <- colnames(bulk.df)[-1]
+colnames(gain_loss.res)[1] <- 'ST_HSC'
+gain_loss.res$LT_HSC <- c(0,sum(bulk.df[,1]!=0),0)
+
+
+gain_loss.res$class <- c('Novel','Conserved','Lost')
+gain_loss.res[3,c(1:15,17)] <- - gain_loss.res[3,c(1:15,17)]
+
+
+
+library(ggsci)
+library(ggrepel)
+
+APA.colors = pal_nejm()(8)
+
+df <- melt(gain_loss.res,id='class')
+
+names <- c('LT_HSC','ST_HSC','MPP','CMP','GMP','Gn',"Mφ",'Mo','CLP','B','T_CD4','T_CD8','NK','MEP','EryA','EryB')
+gain_lossPA<-ggplot(df,aes(x=variable,y=value,fill=class))+geom_bar(stat = 'identity')+
+  scale_fill_manual(values = APA.colors[1:3])+
+  scale_x_discrete(limits=names)+
+   labs(y = 'Number of PAs',x='')+
+            theme(plot.title = element_text(hjust = 0.5,face = 'bold', size = 16),
+                  legend.position = 'top', legend.title = element_blank(),
+                  legend.text = element_text(size=15),
+                  axis.text.x = element_text(size=12,angle = 90, hjust = 1),
+                  axis.title.x = element_blank(),
+                  axis.title.y = element_text(size=15),
+                  axis.text.y  = element_text(size=15),
+                  panel.grid.major =element_blank(),
+                  panel.grid.minor = element_blank(),
+                  panel.background = element_blank(),
+                  axis.line = element_line(colour = "black"))
+ggsave('figures/gain_lossPA.pdf',plot=gain_lossPA,width = 8,height = 6)
+
+PAs <-  apply(bulk.df, 2, function(x)which(x>0))
+#lymphoid
+ST_HSC <- setdiff(PAs[[2]],PAs[[1]])
+MPP <- setdiff(PAs[[3]],PAs[[2]])
+CLP <- setdiff(PAs[[4]],PAs[[3]])
+mature <- setdiff(unique(c(PAs[[10]],PAs[[11]],PAs[[12]],PAs[[13]])),
+                  c(CLP,MPP,ST_HSC))
+lineage = c(length(ST_HSC),length(MPP),length(CLP),length(mature))/length(c(ST_HSC,MPP,CLP,mature))
+
+B <-PAs[[10]]
+B_1 <- intersect(ST_HSC,B)
+B_2 <- intersect(MPP,B)
+B_3 <- intersect(CLP,B)
+B_4 <- intersect(mature,B)
+
+B = c(length(B_1),length(B_2),length(B_3),length(B_4))/length(c(B_1,B_2,B_3,B_4))
+
+T_cell <- unique(c(PAs[[11]],PAs[[12]]))
+T_1 <- intersect(ST_HSC,T_cell)
+T_2 <- intersect(MPP,T_cell)
+T_3 <- intersect(CLP,T_cell)
+T_4 <- intersect(mature,T_cell)
+
+T_c =c(length(T_1),length(T_2),length(T_3),length(T_4))/length(c(T_1,T_2,T_3,T_4))
+
+
+NK_cell <- PAs[[13]]
+NK_1 <- intersect(ST_HSC,NK_cell)
+NK_2 <- intersect(MPP,NK_cell)
+NK_3 <- intersect(CLP,NK_cell)
+NK_4 <- intersect(mature,NK_cell)
+
+NK_c =c(length(NK_1),length(NK_2),length(NK_3),length(NK_4))/length(c(NK_1,NK_2,NK_3,NK_4))
+
+lymphoid <- data.frame(lineage =lineage,
+                       B =B,
+                       T=T_c,
+                       NK=NK_c)
+lymphoid$class <- factor(c('ST_HSC','MPP','CLP','mature'),levels=c('ST_HSC','MPP','CLP','mature'))
+
+
+df <- melt(lymphoid,id='class')
+ggplot(df,aes(x=variable,y=value,fill=class))+geom_bar(stat = 'identity')
+
+
+
+#myeloid
+
+ST_HSC <- setdiff(PAs[[2]],PAs[[1]])
+MPP <- setdiff(PAs[[3]],PAs[[2]])
+CMP <- setdiff(PAs[[5]],PAs[[3]])
+GMP <- setdiff(PAs[[6]],PAs[[5]])
+mature <- setdiff(unique(c(PAs[[7]],PAs[[8]],PAs[[9]])),
+                  c(CMP,GMP,MPP,ST_HSC))
+lineage = c(length(ST_HSC),length(MPP),length(CMP),length(GMP),length(mature))/length(c(ST_HSC,MPP,CMP,GMP,mature))
+
+mo <-PAs[[9]]
+mo_1 <- intersect(ST_HSC,mo)
+mo_2 <- intersect(MPP,mo)
+mo_3 <- intersect(CMP,mo)
+mo_4 <- intersect(GMP,mo)
+mo_5 <- intersect(mature,mo)
+
+mo = c(length(mo_1),length(mo_2),length(mo_3),length(mo_4),length(mo_5))/length(c(mo_1,mo_2,mo_3,mo_4,mo_5))
+
+Gn <- PAs[[8]]
+Gn_1 <- intersect(ST_HSC,Gn)
+Gn_2 <- intersect(MPP,Gn)
+Gn_3 <- intersect(CMP,Gn)
+Gn_4 <- intersect(GMP,Gn)
+Gn_5 <- intersect(mature,Gn)
+
+Gn = c(length(Gn_1),length(Gn_2),length(Gn_3),length(Gn_4),length(Gn_5))/length(c(Gn_1,Gn_2,Gn_3,Gn_4,Gn_5))
+
+mp <- PAs[[7]]
+mp_1 <- intersect(ST_HSC,mp)
+mp_2 <- intersect(MPP,mp)
+mp_3 <- intersect(CMP,mp)
+mp_4 <- intersect(GMP,mp)
+mp_5 <- intersect(mature,mp)
+
+mp = c(length(mp_1),length(mp_2),length(mp_3),length(mp_4),length(mp_5))/length(c(mp_1,mp_2,mp_3,mp_4,mp_5))
+
+myeloid <- data.frame(lineage =lineage,
+                       Mo =mo,
+                       Gn=Gn,
+                       Mp=mp)
+myeloid$class <- factor(c('ST_HSC','MPP','CMP','GMP','mature'),levels=c('ST_HSC','MPP','CMP','GMP','mature'))
+
+df <- melt(myeloid,id='class')
+ggplot(df,aes(x=variable,y=value,fill=class))+geom_bar(stat = 'identity')
+
+
+
+
+#erythroid
+
+ST_HSC <- setdiff(PAs[[2]],PAs[[1]])
+MPP <- setdiff(PAs[[3]],PAs[[2]])
+CMP <- setdiff(PAs[[5]],PAs[[3]])
+MEP <- setdiff(PAs[[14]],PAs[[5]])
+erya <- setdiff(PAs[[15]],PAs[[14]])
+eryB <- setdiff(PAs[[16]],PAs[[15]])
+
+lineage = c(length(ST_HSC),length(MPP),length(CMP),length(MEP),length(erya),length(eryb))/length(c(ST_HSC,MPP,CMP,MEP,erya,eryB))
+
+eryb <-setdiff(PAs[[16]],PAs[[1]])
+e_1 <- intersect(ST_HSC,eryb)
+e_2 <- intersect(MPP,eryb)
+e_3 <- intersect(CMP,eryb)
+e_4 <- intersect(MEP,eryb)
+e_5 <- intersect(erya,eryb)
+e_6 <- intersect(eryB,eryb)
+
+ery = c(length(e_1),length(e_2),length(e_3),length(e_4),length(e_5),length(e_6))/length(c(e_1,e_2,e_3,e_4,e_5,e_6))
+
+Erythroid <- data.frame(lineage =lineage,
+                       EryB =ery)
+Erythroid$class <- factor(c('ST_HSC','MPP','CMP','MEP','EryA','EryB'),levels=c('ST_HSC','MPP','CMP','MEP','EryA','EryB'))
+
+df <- melt(Erythroid,id='class')
+ggplot(df,aes(x=variable,y=value,fill=class))+geom_bar(stat = 'identity')
+
+
+
+
+
+save(gain_loss.res,PAs,file='gain_loss.RData')
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

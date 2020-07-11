@@ -1,0 +1,387 @@
+#%genes with APA
+#number of differential APA
+
+```{r requires}
+library(data.table)
+library(dplyr)
+setwd('/mnt/raid61/Personal_data/xiaoxia/APA/Project/Hema_mouse/bulk_tianjin/')
+hema_mm <- hema_mm <- fread('Analysis/rawdata/filtered.RUD.txt')
+hema_mm.rud <- as.data.frame(hema_mm[,70:103])
+rownames(hema_mm.rud) <- paste0(hema_mm$gene_id.x,":",hema_mm$PA.ID)
+
+sample.info <- fread('Hema_sampleinfo.txt')
+anno_col <- gsub('.RUD','',colnames(hema_mm.rud))
+hema_mm.rud[hema_mm.rud >1] <- NA
+
+colnames(hema_mm.rud) <- anno_col
+```
+
+#Quantification of the loss of regulatory elements upon 3′ UTR shortening
+```{r}
+UTR <- hema_mm[,c('gene_id.x','PA.y','seqnames','strand','st','ed')]
+UTR$id <- paste(UTR$gene_id.x,UTR$seqnames,UTR$strand,UTR$st,UTR$PA.y,UTR$ed,sep = ':')
+cUTR <- UTR %>% mutate(start = ifelse(strand=='+',st,PA.y ),
+                        end = ifelse(strand=='+', PA.y,ed))
+cUTR <- cUTR[,c(1,3,4,7,8,9)]
+colnames(cUTR)[1] <- 'gene_id'
+
+aUTR <- UTR %>% mutate(start = ifelse(strand=='+',PA.y,st ),
+                        end = ifelse(strand=='+', ed,PA.y))
+aUTR <- aUTR[,c(1,3,4,7,8,9)]
+colnames(aUTR)[1] <- 'gene_id'
+
+library(GenomicFeatures)
+anno.UTR <- fread('src/reduced.3utr.txt')
+setDT(aUTR)
+setkey(aUTR,'gene_id','seqnames','strand','start','end')
+
+setDT(cUTR)
+setkey(cUTR,'gene_id','seqnames','strand','start','end')
+
+setkey(anno.UTR,'gene_id','seqnames','strand','start','end')
+
+cUTR.t <- foverlaps(cUTR,anno.UTR)
+ce <- function(x){
+  if(x[3]=='+'){
+    st <- x[4]
+    ed <- min(x[5],x[9])
+  }else{
+    st <- max(x[4],x[8])
+    ed <- x[5]
+  }
+  return(c(st,ed))
+}
+test <- apply(cUTR.t, 1, ce)
+cUTR.t <- cbind(cUTR.t,t(test))
+cUTR.t <- cUTR.t[,-c(8,9)]
+colnames(cUTR.t)[c(4:6,8:9)] <- c('utr_st','utr_ed','utr_width','start','end')
+cUTR <- makeGRangesListFromDataFrame(cUTR.t,
+                                       keep.extra.columns = TRUE,
+                                       split.field = 'id')
+
+
+
+
+aUTR.t <- foverlaps(aUTR,anno.UTR)
+ces <- function(x){
+  if(x[3]=='+'){
+    st <- max(x[4],x[8])
+    ed <- x[5]
+  }else{
+    st <- x[4]
+    ed <- min(x[5],x[9])
+  }
+  return(c(st,ed))
+}
+test <- apply(aUTR.t, 1, ces)
+aUTR.t <- cbind(aUTR.t,t(test))
+aUTR.t <- aUTR.t[,-c(8,9)]
+colnames(aUTR.t)[c(4:6,8:9)] <- c('utr_st','utr_ed','utr_width','start','end')
+aUTR <- makeGRangesListFromDataFrame(aUTR.t,
+                                       keep.extra.columns = TRUE,
+                                       split.field = 'id')
+width.aUTR <- lapply(aUTR, function(x)sum(width(x)))
+hist(log(as.numeric(width.aUTR)))
+width.cUTR  <- lapply(cUTR, function(x)sum(width(x)))
+hist(log(as.numeric(width.cUTR)))
+
+write.table(aUTR.t,file = 'Analysis/rawdata/aUTR.txt',col.names = T,row.names = F,quote=F,sep='\t')
+write.table(cUTR.t,file = 'Analysis/rawdata/cUTR.txt',col.names = T,row.names = F,quote=F,sep='\t')
+```
+#%genes with APA
+```{r}
+library(data.table)
+library(dplyr)
+filenames <- list.files('./ChangePoint/')
+files <- list()
+for(i in filenames){files[[i]] <- fread(paste0('./ChangePoint/',i),drop=1)}
+
+files <- do.call(rbind,files)
+#filtering out some events
+#1.no APA
+files <- files[!is.na(PA),]
+#2.S_coverage lower than 10,convert RUD to be NA
+sample.info <- fread('./Hema_sampleinfo.txt',header=T)
+samples <- sample.info$sample
+newfiles <- files
+newfiles$PA.ID <- paste(newfiles$gene_id,newfiles$PA,sep = '|')
+
+
+ref.anno <- fread('./src/reduced.3utr.txt',header = T)
+#remove PAS within 150bp distance to the start and end of region
+ref.anno.m <- ref.anno%>%group_by(gene_id)%>%mutate(st=min(start),ed=max(end))%>%
+  select(seqnames,strand,gene_id,st,ed)%>%unique()
+
+PAS <- merge(newfiles[,c('PA','gene_id','PA.ID')],ref.anno.m,by='gene_id',all.x = T)
+
+dist_s <- abs(PAS$PA- PAS$st)
+dist_e <- abs(PAS$PA-PAS$ed)
+
+PAS <- PAS[dist_s >=200 &dist_e >=200,]
+
+test.files <- merge(newfiles,PAS,by='PA.ID',all.y = T)
+test.files$PA.ID <- paste0(test.files$seqnames,':',test.files$PA.x,':',test.files$strand)
+#3.mean RUD of all samples greater than  1
+
+mean_RUD <- rowMeans(test.files[,70:103],na.rm = T)
+sd_RUD <- apply(test.files[,70:103],1,function(x)sd(x,na.rm=T))
+median_RUD <- apply(test.files[,70:103],1,function(x)median(x,na.rm=T))
+N.NAs <- apply(test.files[,70:103],1,function(x)sum(is.na(x)))
+S.cov <- apply(test.files[,36:69], 1, median)
+
+#filtered <- test.files[median_RUD < 1 &N.NAs <=30,]
+filtered <- test.files[S.cov >=20&N.NAs <=32,]
+filtered$PA.ID <- paste0(filtered$seqnames,':',filtered$PA.x,':',filtered$strand)
+length(unique(filtered$gene_id.x))
+
+#genes with APA:RUCP <=0.8
+#genes without APA: RUCP >0.8
+celltype <- unique(sample.info$CellType)
+rud <- filtered[,70:103]
+colnames(rud) <- gsub('.RUD','',colnames(rud))
+
+genes_apa <- list()
+for(i in celltype){
+  samples <- sample.info[CellType == i,]$ColName
+  dt <- rud[,..samples]
+  ge_apa <- apply(dt, 1, median)
+  genes_apa[[i]] <- ge_apa
+}
+genes_apa <- do.call(cbind,genes_apa)
+
+genes_apa[genes_apa <= 0.8] <- 'APA'
+genes_apa[genes_apa !='APA'] <- 'sPA'
+genes_apa_celltype <- apply(genes_apa, 2, table)
+```
+
+#weighted mean length
+```{r}
+filtered$id <- paste(filtered$gene_id.x,
+                     filtered$seqnames,
+                     filtered$strand,
+                     filtered$st,
+                     filtered$PA.y,
+                     filtered$ed,
+                     sep = ':'
+                     )
+UTR <- filtered[,c('gene_id.x','PA.y','seqnames','strand','st','ed','id')]
+
+cUTR <- UTR %>% mutate(start = ifelse(strand=='+',st,PA.y ),
+                        end = ifelse(strand=='+', PA.y,ed))
+cUTR <- cUTR[,c(1,3,4,7,8,9)]
+colnames(cUTR)[1] <- 'gene_id'
+
+aUTR <- UTR %>% mutate(start = ifelse(strand=='+',PA.y,st ),
+                        end = ifelse(strand=='+', ed,PA.y))
+aUTR <- aUTR[,c(1,3,4,7,8,9)]
+colnames(aUTR)[1] <- 'gene_id'
+
+library(GenomicFeatures)
+anno.UTR <- fread('src/reduced.3utr.txt')
+setDT(aUTR)
+setkey(aUTR,'gene_id','seqnames','strand','start','end')
+
+setDT(cUTR)
+setkey(cUTR,'gene_id','seqnames','strand','start','end')
+
+setkey(anno.UTR,'gene_id','seqnames','strand','start','end')
+
+cUTR.t <- foverlaps(cUTR,anno.UTR)
+ce <- function(x){
+  if(x[3]=='+'){
+    st <- x[4]
+    ed <- min(x[5],x[9])
+  }else{
+    st <- max(x[4],x[8])
+    ed <- x[5]
+  }
+  return(c(st,ed))
+}
+test <- apply(cUTR.t, 1, ce)
+cUTR.t <- cbind(cUTR.t,t(test))
+cUTR.t <- cUTR.t[,-c(8,9)]
+colnames(cUTR.t)[c(4:6,8:9)] <- c('utr_st','utr_ed','utr_width','start','end')
+cUTR <- makeGRangesListFromDataFrame(cUTR.t,
+                                       keep.extra.columns = TRUE,
+                                       split.field = 'id')
+
+
+
+
+aUTR.t <- foverlaps(aUTR,anno.UTR)
+ces <- function(x){
+  if(x[3]=='+'){
+    st <- max(x[4],x[8])
+    ed <- x[5]
+  }else{
+    st <- x[4]
+    ed <- min(x[5],x[9])
+  }
+  return(c(st,ed))
+}
+test <- apply(aUTR.t, 1, ces)
+aUTR.t <- cbind(aUTR.t,t(test))
+aUTR.t <- aUTR.t[,-c(8,9)]
+colnames(aUTR.t)[c(4:6,8:9)] <- c('utr_st','utr_ed','utr_width','start','end')
+aUTR <- makeGRangesListFromDataFrame(aUTR.t,
+                                       keep.extra.columns = TRUE,
+                                       split.field = 'id')
+width.aUTR <- lapply(aUTR, function(x)sum(width(x)))
+hist(log(as.numeric(width.aUTR)))
+width.cUTR  <- lapply(cUTR, function(x)sum(width(x)))
+hist(log(as.numeric(width.cUTR)))
+
+#write.table(aUTR.t,file = 'Analysis/rawdata/aUTR.txt',col.names = T,row.names = F,quote=F,sep='\t')
+#write.table(cUTR.t,file = 'Analysis/rawdata/cUTR.txt',col.names = T,row.names = F,quote=F,sep='\t')
+
+total.length <- as.numeric(width.cUTR) + as.numeric(width.aUTR)
+#weighted_utr_length WUL
+identical(names(width.cUTR),filtered$id)
+filtered$utr.length<- as.numeric(total.length)
+rud <- filtered[,70:103]
+colnames(rud) <- gsub('.RUD','',colnames(rud))
+rud[rud >1] <- NA
+WUL <-  rud *as.numeric(total.length)
+WUL[is.na(WUL)] <- 0
+WUL[WUL > max(as.numeric(width.cUTR)) ] <- 0
+ge <- scale(t(WUL))
+res <- hcut(ge, k = 4, stand = T)
+
+#pearson correlation
+cor.res <- cor(t(ge),method = 'pearson',use='pairwise.complete.obs')
+cor.res <- cor(WUL,WUL,method = 'pearson',use='pairwise.complete.obs')
+generate_breaks = function(x, n, center = F){
+    if(center){
+        m = max(abs(c(min(x, na.rm = T), max(x, na.rm = T))))
+        res = seq(-m, m, length.out = n + 1)
+    }
+    else{
+        res = seq(min(x, na.rm = T), max(x, na.rm = T), length.out = n + 1)
+    }
+    
+    return(res)
+}
+
+my_palette <- colorRampPalette(rev(brewer.pal(11, "Spectral")), space="rgb")(n=100)
+
+breaks = generate_breaks(cor.res,length(colors),center = T)
+pdf('/mnt/raid61/Personal_data/xiaoxia/APA/Project/Hema_mouse/bulk_tianjin/Analysis/figures/cor.utr.length.pdf',8,8)
+pheatmap(cor.res, main = 'correlation of weighted utr length',
+          color = my_palette,
+          #breaks = breaks,
+         cluster_cols = F,
+         cluster_rows = F)
+dev.off()
+```
+
+#Celltype and Lineage Variabilities
+```{r}
+library(lme4)
+#fm1 <- lmer(Reaction ~ Days + (Days | Subject), sleepstudy))
+```
+
+#logical regression 
+```{r}
+# Logistics Regression
+#glm.fit <- glm(Direction ~ Lag1 + Lag2 + Lag3 + Lag4 + Lag5 + Volume, data = Smarket, family = binomial)
+
+#myloied
+log.data <- log1p(WUL[,1:16])
+colnames(log.data) <- gsub('_.*','',colnames(log.data))
+log.data <- melt(log.data)
+log.data$variable <- as.factor(log.data$variable)
+log.fit <- glm(variable ~ value, 
+               data = log.data,
+               na.action="na.exclude",
+               family = binomial)
+
+#lymphoied
+log.data <- log1p(WUL[,c(1:6,17:26)])
+colnames(log.data) <- gsub('_.*','',colnames(log.data))
+log.data <- melt(log.data)
+log.data$variable <- as.factor(log.data$variable)
+log.fit <- glm(variable ~ value, 
+               data = log.data,
+               na.action="na.exclude",
+               family = binomial)
+
+#erythoied
+log.data <- log1p(WUL[,c(1:10,28:34)])
+colnames(log.data) <- gsub('_.*','',colnames(log.data))
+log.data <- melt(log.data)
+log.data$variable <- as.factor(log.data$variable)
+log.fit <- glm(variable ~ value, 
+               data = log.data,
+               na.action="na.exclude",
+               family = binomial)
+#progenitors
+log.data <- log1p(WUL[,c(1:10,17:18,27:28)])
+
+log.data <- rud[,c(1:10,17:18,27:28)]
+
+colnames(log.data) <- gsub('_.*','',colnames(log.data))
+
+log.data <- reshape2::melt(log.data)
+
+log.data$APA <- 0
+log.data[log.data$value <=0.8,]$APA <- 1
+log.data$variable <- as.factor(log.data$variable)
+log.data[log.data$value >1,]$value <- 'NA'
+
+
+model <- glm(APA ~ value+variable, 
+               data = log.data,
+               na.action="na.exclude",
+               family = binomial)
+b0 <- model$coef[1] # intercept
+RUD <- model$coef[2]
+rud.sthsc <- -model$coef[3]
+rud.mpp <- model$coef[4]
+rud.cmp <- model$coef[5]
+rud.gmp <- model$coef[6]
+rud.clp <- model$coef[7]
+rud.mep <- model$coef[8]
+RUD_range <- seq(from=0, to=1, by=.01)
+sthsc_logits <- b0 + 
+  RUD*RUD_range + 
+  rud.sthsc*1
+sthsc_probs <- exp(sthsc_logits)/(1 + exp(sthsc_logits))
+
+
+plot(RUD_range, sthsc_probs, 
+     ylim=c(0,1),
+     type="l", 
+     lwd=3, 
+     lty=2, 
+     col="gold", 
+     xlab="RUD", ylab="P(outcome)", main="Probability of super important outcome")
+
+ggplot(log.data, aes(x=value, y=variable)) + geom_point() + 
+  stat_smooth(method="glm", method.args=list(family="binomial"), se=FALSE)
+
+```
+
+#number of lengthening and shortening comprare with LT_HSC
+```{r}
+#mean weighted utr length:MWUL
+
+MWUL <- list()
+for(i in celltype){
+  samples <- sample.info[CellType == i,]$ColName
+  dt <- WUL[,..samples]
+  MWUL[[i]] <- apply(dt, 1, mean)
+}
+MWUL <- do.call(cbind,MWUL)
+MWUL.t <- MWUL[,-1] - MWUL[,1]
+plot(log10(MWUL[,1:2]))
+abline(coef=c(0,1))
+```
+
+
+
+
+
+
+
+
+

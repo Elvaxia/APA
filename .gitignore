@@ -1,3 +1,4 @@
+*.fa
 *.bedgraph
 *.tmp
 *.sort.merged
