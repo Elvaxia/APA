@@ -1,0 +1,381 @@
+---
+title: "PCBP2 KD IRs analysis"
+author: "Tang Chao"
+date: "2019/12/31"
+output: 
+  html_document:
+    code_folding: "hide"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load function 
+
+```{r}
+## Load function ----------------------------------------------------------------------------------
+
+options(stringsAsFactors = FALSE)
+stopifnot(is.element("ggstatsplot", installed.packages()))
+suppressPackageStartupMessages(library(ggstatsplot))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(caret))
+suppressPackageStartupMessages(library(ggforce))
+suppressPackageStartupMessages(library(GenomicAlignments))
+suppressPackageStartupMessages(library(GenomicRanges))
+suppressPackageStartupMessages(library(BSgenome))
+suppressPackageStartupMessages(library("BSgenome.Hsapiens.UCSC.hg19"))
+suppressPackageStartupMessages(library(rGADEM))
+
+
+ID2gr <- function(ID) {
+  GenomicRanges::GRanges(seqnames = mapply(FUN = function(x) x[1], strsplit(ID, ":")), 
+          ranges = IRanges::IRanges(start = as.numeric(mapply(FUN = function(x) x[2], strsplit(ID, "[:-]"))), 
+                           end = as.numeric(mapply(FUN = function(x) x[3], strsplit(ID, "[:-]")))), 
+          strand = mapply(FUN = function(x) x[3], strsplit(ID, ":")), 
+          ID = ID)
+}
+
+PieFun <- function(Input, PCutoff = 0.05, deltaCutoff = 0.1, labsize = 4) {
+  Pie <- table(Input[Ttest.P < PCutoff & abs(delta) > deltaCutoff, delta] > 0)
+  Pie <- data.frame(row.names = names(Pie), Freq = as.numeric(Pie))
+  if(nrow(Pie) == 1) {
+    if("TRUE" %in% row.names(Pie)) {
+      Pie["FALSE", "Freq"] <- 0
+    } else {
+      Pie["TRUE", "Freq"] <- 0
+    }
+  }
+  
+  Pie[row.names(Pie) == "FALSE", "Type"] <- "Down"
+  Pie[row.names(Pie) != "FALSE", "Type"] <- "Up"
+  
+  Pie$Type <- factor(Pie$Type, levels = c("Up", "Down"))
+  
+  # Barplot
+  bp <- ggplot(Pie, aes(x="", y = Freq, fill = Type))+
+    geom_bar(width = 1, stat = "identity")
+  blank_theme <- theme_minimal()+
+    theme(
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      panel.border = element_blank(),
+      panel.grid=element_blank(),
+      axis.ticks = element_blank()
+    )
+  # Use brewer palette
+  library(pheatmap)
+  library(RColorBrewer)
+  
+  bp + coord_polar("y", start=0) + 
+    # scale_fill_brewer(palette="Spectral") +
+    scale_fill_manual(values = colorRampPalette(rev(brewer.pal(n = 7, name = "Paired")))(nrow(Pie))) + 
+    blank_theme +
+    theme(axis.text.x = element_blank())+
+    geom_text(aes(x = 1, y = c(0, cumsum(Freq)[-length(Freq)]) + Freq/2, label = Freq), size = labsize) -> p
+  return(p)
+}
+
+VennFun <- function(input, col1 = RColorBrewer::brewer.pal(3, "Set1")[1], col2 = RColorBrewer::brewer.pal(3, "Set1")[2]) {
+  lab1 <- paste(sum(!input[[1]] %in% input[[2]]), "\n(", round(mean(!input[[1]] %in% input[[2]]) * 100, 2), "%)", sep = "")
+  lab2 <- length(intersect(input[[1]], input[[2]]))
+  lab3 <- paste(sum(!input[[2]] %in% input[[1]]), "\n(", round(mean(!input[[2]] %in% input[[1]]) * 100, 2), "%)", sep = "")
+  
+  ggplot() + geom_circle(aes(x0 = c(-1, 1), 
+                             y0 = c(0, 0), 
+                             r = c(2, 2), 
+                             color = c(col1, col2), 
+                             fill = c(col1, col2)), 
+                         lwd = 1.5, 
+                         alpha = .1)+
+    guides(color = F, fill = F, alpha = F)+
+    scale_fill_manual(values = c(col1, col2)) +
+    scale_color_manual(values = c(col1, col2)) +
+    # theme_no_axes() + 
+    theme(line = element_blank(), 
+          axis.text = element_blank(), 
+          axis.title = element_blank(), 
+          panel.background = element_blank()) + 
+    # theme_nothing() + 
+    ggplot2::annotate("text", x = c(-2, 0, 2), y = 0, label = c(lab1, lab2, lab3), size = 4) + 
+    ggplot2::annotate("text", x = c(-1, 1), y = 2.2, label = names(input), size = 4)
+}
+```
+
+## Read PWM
+
+```{r}
+# load(file = "/mnt/data7/tangchao/Project/IRMethod/data/PWMs/All_PFMs.RData")
+load(file = "/mnt/data7/tangchao/Project/IRMethod/data/PWMs/All_PPMs.RData")
+# load(file = "/mnt/data7/tangchao/Project/IRMethod/data/PWMs/All_PWMs.RData")
+
+# PFMs <- c(RBPDB_PFMs, CISBP_PFMs, Ray_PFMs, RBNS_PFMs)
+PPMs <- c(RBPDB_PPMs, CISBP_PPMs, Ray_PPMs, RBNS_PPMs)
+# PWMs <- c(RBPDB_PWMs, CISBP_PWMs, Ray_PWMs, RBNS_PWMs)
+
+ids <- mapply(function(x) x[2], strsplit(names(PPMs), "@"))
+ids[is.na(ids)] <- names(PPMs)[is.na(ids)]
+
+PWMs = toPWM(PPMs, ids = ids, targets = mapply(function(x) x[1], strsplit(names(PPMs), "@")))
+```
+
+```{r}
+P <- "PCBP2"
+
+K562 <- fread(file = paste("/mnt/data7/tangchao/Project/IRMethod/analysis/RBP_KD/Diff/K562/", P, ".tab", sep = ""))
+HepG2 <- fread(file = paste("/mnt/data7/tangchao/Project/IRMethod/analysis/RBP_KD/Diff/HepG2/", P, ".tab", sep = ""))
+```
+
+
+## K562 Vs. HepG2 Venn plot
+```{r}
+p1 <- list()
+p1[[1]] <- VennFun(input = list(K562 = K562[, IR], HepG2 = HepG2[, IR]))
+p1[[2]] <- VennFun(input = list(K562 = K562[Ttest.P < 0.05 & abs(delta) > 0.1, IR], HepG2 = HepG2[Ttest.P < 0.05 & abs(delta) > 0.1, IR]))
+p1[[3]] <- VennFun(input = list(K562 = unique(K562[Ttest.P < 0.05 & abs(delta) > 0.1, HostGene]), HepG2 = unique(HepG2[Ttest.P < 0.05 & abs(delta) > 0.1, HostGene])))
+```
+
+```{r fig.width = 9, fig.height = 3, warning=FALSE, message=FALSE}
+ggstatsplot::combine_plots(
+  p1[[1]] + labs(title = "All IRs"),
+  p1[[2]] + labs(title = "DE IRs"),
+  p1[[3]] + labs(title = "DE IRs' Hostgene"),
+  ncol = 3, 
+  # labels = c("IRFinder", "IRSelector"),
+  # label_x = - 0.05,
+  # title.text = "No machine learning",
+  # caption.text = "raw counts >= 10",
+  # title.color = "red",
+  caption.color = "blue"
+)
+```
+
+## K562
+```{r}
+DE_IRs <- K562[Ttest.P < 0.05 & abs(delta) > 0.1, IR]
+DE_IRs_gr <- ID2gr(DE_IRs)
+DE_IRs_gr$Class <- "DE"
+
+CE_IRs <- K562[AllPASS == 1 & Ttest.P > 0.5, IR]
+CE_IRs_gr <- ID2gr(CE_IRs)
+CE_IRs_gr$Class <- "CE"
+
+IRs_gr <- c(DE_IRs_gr, CE_IRs_gr)
+
+IR_Ge <- unique(rbind(K562[, .(IR, HostGene, GeneName)], HepG2[, .(IR, HostGene, GeneName)]))
+setkey(IR_Ge, "IR")
+
+IRs_gr$HostGene <- IR_Ge[IRs_gr$ID, HostGene]
+IRs_gr$GeneName <- IR_Ge[IRs_gr$ID, GeneName]
+```
+
+```{r}
+start(IRs_gr) <- start(IRs_gr) - 100
+end(IRs_gr) <- end(IRs_gr) + 100
+IRs_seq <-  BSgenome::getSeq(Hsapiens, IRs_gr)
+```
+
+### PWMEnrich
+
+```{r}
+library(PWMEnrich)
+
+bg.seq <- IRs_seq[IRs_gr$Class == "CE"]
+
+bg.seq <- bg.seq[!grepl("N", bg.seq)]
+
+registerCoresPWMEnrich(10)
+
+bg.denovo = makeBackground(motifs = PWMs, organism = "hg19", type = "logn", quick = FALSE)
+
+bg.custom = makeBackground(motifs = PWMs, bg.seq = bg.seq, type = "logn", bg.len = 100, bg.source = "Introns split into 100bp chunks")
+
+save(bg.denovo, bg.custom, file = "/mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/PWMEnrich/RData/bg_K562_PCBP2_KD_DE_Vs_CE.RData")
+
+```
+
+```{r}
+sequence =  IRs_seq[IRs_gr$Class == "DE"]
+
+PWMEnrich = motifEnrichment(sequence, bg.custom)
+PWMEnrich_nbg = motifEnrichment(sequence, bg.denovo)
+
+repo <- groupReport(PWMEnrich, top = 0.01, bg = T)
+repo2 <- groupReport(PWMEnrich, by.top.motifs=TRUE, top = 0.01, bg = T)
+
+repo_ngb <- groupReport(PWMEnrich_nbg, top = 0.01, bg = T)
+repo_ngb2 <- groupReport(PWMEnrich_nbg, by.top.motifs=TRUE, top = 0.01, bg = T)
+
+registerCoresPWMEnrich(NULL)
+save(PWMEnrich, PWMEnrich_nbg, file = "/mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/PWMEnrich/RData/PWMEnrich_K562_PCBP2_KD_DE_Vs_CE.RData")
+```
+
+```{r}
+DT::datatable(as.data.frame(repo))
+```
+
+```{r}
+hist(repo$p.value, main = "Histogram of p.value")
+hist(repo_ngb$p.value, main = "Histogram of p.value")
+
+plot(repo[1:10], fontsize=12, id.fontsize=12)
+plot(repo_ngb[1:10], fontsize=12, id.fontsize=12)
+
+plot(repo2[1:10], fontsize=12, id.fontsize=12)
+plot(repo_ngb2[1:10], fontsize=12, id.fontsize=12)
+```
+
+### MEME
+```{r}
+IRs_gr <- c(DE_IRs_gr, CE_IRs_gr)
+
+IRs_5s_seq <- BSgenome::getSeq(Hsapiens, flank(IRs_gr, width = 150, both = T, start = TRUE))
+# IRs_3s_seq <- BSgenome::getSeq(Hsapiens, flank(IRs_gr, width = 150, both = T, start = FALSE))
+
+
+sequence =  IRs_5s_seq[IRs_gr$Class == "DE"]
+names(sequence) <- IRs_gr$ID[IRs_gr$Class == "DE"]
+writeXStringSet(sequence, filepath = "/mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/K562/PCBP2_DE.s5.fa", append = FALSE, compress = FALSE, compression_level = NA, format="fasta")
+
+sequence =  IRs_5s_seq[IRs_gr$Class == "CE"]
+names(sequence) <- IRs_gr$ID[IRs_gr$Class == "CE"]
+writeXStringSet(sequence, filepath = "/mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/K562/PCBP2_CE.s5.fa", append = FALSE, compress = FALSE, compression_level = NA, format="fasta")
+```
+
+```{bash }
+centrimo /mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/K562/PCBP2_DE.s5.fa /mnt/data7/tangchao/Project/IRMethod/data/PWMs/MEME/motif_databases/RNA/Ray2013_rbp_Homo_sapiens.dna_encoded.meme --neg /mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/K562/PCBP2_CE.s5.fa --oc /mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/K562/PCBP2.S5
+```
+
+
+```{r}
+# IRs_5s_seq <- BSgenome::getSeq(Hsapiens, flank(IRs_gr, width = 150, both = T, start = TRUE))
+IRs_3s_seq <- BSgenome::getSeq(Hsapiens, flank(IRs_gr, width = 150, both = T, start = FALSE))
+
+sequence =  IRs_3s_seq[IRs_gr$Class == "DE"]
+names(sequence) <- IRs_gr$ID[IRs_gr$Class == "DE"]
+writeXStringSet(sequence, filepath = "/mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/K562/PCBP2_DE.s3.fa", append = FALSE, compress = FALSE, compression_level = NA, format="fasta")
+
+sequence =  IRs_3s_seq[IRs_gr$Class == "CE"]
+names(sequence) <- IRs_gr$ID[IRs_gr$Class == "CE"]
+writeXStringSet(sequence, filepath = "/mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/K562/PCBP2_CE.s3.fa", append = FALSE, compress = FALSE, compression_level = NA, format="fasta")
+```
+
+```{bash }
+centrimo /mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/K562/PCBP2_DE.s3.fa /mnt/data7/tangchao/Project/IRMethod/data/PWMs/MEME/motif_databases/RNA/Ray2013_rbp_Homo_sapiens.dna_encoded.meme --neg /mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/K562/PCBP2_CE.s3.fa --oc /mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/K562/PCBP2.S3
+```
+
+## HepG2
+```{r}
+DE_IRs <- HepG2[Ttest.P < 0.05 & abs(delta) > 0.1, IR]
+DE_IRs_gr <- ID2gr(DE_IRs)
+DE_IRs_gr$Class <- "DE"
+
+CE_IRs <- HepG2[AllPASS == 1 & Ttest.P > 0.5, IR]
+CE_IRs_gr <- ID2gr(CE_IRs)
+CE_IRs_gr$Class <- "CE"
+
+IRs_gr <- c(DE_IRs_gr, CE_IRs_gr)
+
+IR_Ge <- unique(rbind(K562[, .(IR, HostGene, GeneName)], HepG2[, .(IR, HostGene, GeneName)]))
+setkey(IR_Ge, "IR")
+
+IRs_gr$HostGene <- IR_Ge[IRs_gr$ID, HostGene]
+IRs_gr$GeneName <- IR_Ge[IRs_gr$ID, GeneName]
+```
+
+```{r}
+start(IRs_gr) <- start(IRs_gr) - 100
+end(IRs_gr) <- end(IRs_gr) + 100
+IRs_seq <-  BSgenome::getSeq(Hsapiens, IRs_gr)
+```
+
+### PWMEnrich
+
+```{r}
+library(PWMEnrich)
+
+bg.seq <- IRs_seq[IRs_gr$Class == "CE"]
+
+bg.seq <- bg.seq[!grepl("N", bg.seq)]
+
+registerCoresPWMEnrich(10)
+
+bg.denovo = makeBackground(motifs = PWMs, organism = "hg19", type = "logn", quick = FALSE)
+
+bg.custom = makeBackground(motifs = PWMs, bg.seq = bg.seq, type = "logn", bg.len = 100, bg.source = "Introns split into 100bp chunks")
+
+save(bg.denovo, bg.custom, file = "/mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/PWMEnrich/RData/bg_HepG2_PCBP2_KD_DE_Vs_CE.RData")
+
+```
+
+```{r}
+sequence =  IRs_seq[IRs_gr$Class == "DE"]
+
+PWMEnrich = motifEnrichment(sequence, bg.custom)
+PWMEnrich_nbg = motifEnrichment(sequence, bg.denovo)
+
+repo <- groupReport(PWMEnrich, top = 0.01, bg = T)
+repo2 <- groupReport(PWMEnrich, by.top.motifs=TRUE, top = 0.01, bg = T)
+
+repo_ngb <- groupReport(PWMEnrich_nbg, top = 0.01, bg = T)
+repo_ngb2 <- groupReport(PWMEnrich_nbg, by.top.motifs=TRUE, top = 0.01, bg = T)
+
+registerCoresPWMEnrich(NULL)
+save(PWMEnrich, PWMEnrich_nbg, file = "/mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/PWMEnrich/RData/PWMEnrich_HepG2_PCBP2_KD_DE_Vs_CE.RData")
+```
+
+```{r}
+DT::datatable(as.data.frame(repo))
+```
+
+```{r}
+hist(repo$p.value, main = "Histogram of p.value")
+hist(repo_ngb$p.value, main = "Histogram of p.value")
+
+plot(repo[1:10], fontsize=12, id.fontsize=12)
+plot(repo2[1:10], fontsize=12, id.fontsize=12)
+
+plot(repo_ngb[1:10], fontsize=12, id.fontsize=12)
+plot(repo_ngb2[1:10], fontsize=12, id.fontsize=12)
+```
+
+### MEME
+```{r}
+IRs_gr <- c(DE_IRs_gr, CE_IRs_gr)
+
+IRs_5s_seq <- BSgenome::getSeq(Hsapiens, flank(IRs_gr, width = 150, both = T, start = TRUE))
+# IRs_3s_seq <- BSgenome::getSeq(Hsapiens, flank(IRs_gr, width = 150, both = T, start = FALSE))
+
+
+sequence =  IRs_5s_seq[IRs_gr$Class == "DE"]
+names(sequence) <- IRs_gr$ID[IRs_gr$Class == "DE"]
+writeXStringSet(sequence, filepath = "/mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/HepG2/PCBP2_DE.s5.fa", append = FALSE, compress = FALSE, compression_level = NA, format="fasta")
+
+sequence =  IRs_5s_seq[IRs_gr$Class == "CE"]
+names(sequence) <- IRs_gr$ID[IRs_gr$Class == "CE"]
+writeXStringSet(sequence, filepath = "/mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/HepG2/PCBP2_CE.s5.fa", append = FALSE, compress = FALSE, compression_level = NA, format="fasta")
+```
+
+```{bash }
+centrimo /mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/HepG2/PCBP2_DE.s5.fa /mnt/data7/tangchao/Project/IRMethod/data/PWMs/MEME/motif_databases/RNA/Ray2013_rbp_Homo_sapiens.dna_encoded.meme --neg /mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/HepG2/PCBP2_CE.s5.fa --oc /mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/HepG2/PCBP2.S5
+```
+
+
+```{r}
+# IRs_5s_seq <- BSgenome::getSeq(Hsapiens, flank(IRs_gr, width = 150, both = T, start = TRUE))
+IRs_3s_seq <- BSgenome::getSeq(Hsapiens, flank(IRs_gr, width = 150, both = T, start = FALSE))
+
+sequence =  IRs_3s_seq[IRs_gr$Class == "DE"]
+names(sequence) <- IRs_gr$ID[IRs_gr$Class == "DE"]
+writeXStringSet(sequence, filepath = "/mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/HepG2/PCBP2_DE.s3.fa", append = FALSE, compress = FALSE, compression_level = NA, format="fasta")
+
+sequence =  IRs_3s_seq[IRs_gr$Class == "CE"]
+names(sequence) <- IRs_gr$ID[IRs_gr$Class == "CE"]
+writeXStringSet(sequence, filepath = "/mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/HepG2/PCBP2_CE.s3.fa", append = FALSE, compress = FALSE, compression_level = NA, format="fasta")
+```
+
+```{bash }
+centrimo /mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/HepG2/PCBP2_DE.s3.fa /mnt/data7/tangchao/Project/IRMethod/data/PWMs/MEME/motif_databases/RNA/Ray2013_rbp_Homo_sapiens.dna_encoded.meme --neg /mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/HepG2/PCBP2_CE.s3.fa --oc /mnt/data7/tangchao/Project/IRMethod/analysis/PWMs/MEME/KD/HepG2/PCBP2.S3
+```
+
